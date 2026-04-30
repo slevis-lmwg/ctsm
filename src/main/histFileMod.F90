@@ -92,6 +92,11 @@ module histFileMod
                                          ! only exist on history tape 1). Use hist_fincl1 to enable
                                          ! select fields on top of this.
 
+  logical, public :: &
+       hist_all_fields  = .false.        ! namelist: enable all possible history fields on history
+                                         ! tape 1. Use hist_fexcl1 to remove select fields on top
+                                         ! of this.
+
   character(len=max_namlen+2), public :: &
        hist_fincl1(max_flds) = ' '       ! namelist: list of fields to include in history tape 1
                                          !            aka 'h0' history file.
@@ -927,10 +932,8 @@ contains
              allhistfldname = allhistfldlist(fld)%field%name
              call list_index (fincl(1,t), allhistfldname, ff)
 
+             ! if field is in include list, ff > 0
              ff_gt_0: if (ff > 0) then
-
-                ! if field is in include list, ff > 0 and htape_addfld
-                ! will be called for field
 
                 avgflag = getflag (fincl(ff,t))
 
@@ -961,18 +964,13 @@ contains
 
              else if (.not. hist_empty_htapes) then
 
-                ! find index of field in exclude list
+                ! field not explicitly included. check exclude list
 
                 call list_index (fexcl(1,t), allhistfldname, ff)
 
-                ! if field is in exclude list, ff > 0 and htape_addfld
-                ! will not be called for field
-                ! if field is not in exclude list, ff =0 and htape_addfld
-                ! will be called for field (note that htape_addfld will be
-                ! called below only if field is not in exclude list OR in
-                ! include list
+                ! if field is in exclude list, ff > 0.
 
-                if (ff == 0 .and. allhistfldlist(fld)%actflag(t,f)) then
+                if (ff == 0 .and. (allhistfldlist(fld)%actflag(t,f) .or. (hist_all_fields .and. t == 1))) then
                    call htape_addfld (t, f, fld, ' ')
                 end if
 
@@ -2585,6 +2583,7 @@ contains
        call ncd_defdim(lnfid, 'fates_levclscpf', nclmax*nlevsclass*numpft_fates, dimid)
        call ncd_defdim(lnfid, 'fates_levlanduse', n_landuse_cats, dimid)
        call ncd_defdim(lnfid, 'fates_levlulu', n_landuse_cats * n_landuse_cats, dimid)
+       call ncd_defdim(lnfid, 'fates_levlupft', n_landuse_cats * numpft_fates, dimid)
     end if
 
     if ( .not. lhistrest )then
@@ -3819,6 +3818,7 @@ contains
     ! !USES:
     use decompMod   , only : gindex_global
     use domainMod   , only : ldomain, ldomain
+    use dynSubgridControlMod, only : run_has_transient_landcover, get_vars_1dwt_w_time
     !
     ! !ARGUMENTS:
     integer, intent(in) :: t                ! tape index
@@ -3880,9 +3880,6 @@ contains
           call ncd_defvar(varname='land1d_gi', xtype=ncd_int, dim1name=namel, &
                long_name='1d grid index of corresponding landunit', ifill_value=ispval, ncid=ncid)
 
-          call ncd_defvar(varname='land1d_wtgcell', xtype=ncd_double, dim1name=namel, &
-               long_name='landunit weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
-
           call ncd_defvar(varname='land1d_ityplunit', xtype=ncd_int, dim1name=namel, &
                long_name='landunit type (vegetated,urban,lake,wetland,glacier or glacier_mec)', &
                   ifill_value=ispval, ncid=ncid)
@@ -3909,12 +3906,6 @@ contains
 
           call ncd_defvar(varname='cols1d_li', xtype=ncd_int, dim1name=namec, &
                long_name='1d landunit index of corresponding column', ifill_value=ispval, ncid=ncid)
-
-          call ncd_defvar(varname='cols1d_wtgcell', xtype=ncd_double, dim1name=namec, &
-               long_name='column weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
-
-          call ncd_defvar(varname='cols1d_wtlunit', xtype=ncd_double, dim1name=namec, &
-               long_name='column weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
 
           call ncd_defvar(varname='cols1d_itype_col', xtype=ncd_int, dim1name=namec, &
                long_name='column type (see global attributes)', ifill_value=ispval, ncid=ncid)
@@ -3952,15 +3943,6 @@ contains
           call ncd_defvar(varname='pfts1d_ci', xtype=ncd_int, dim1name=namep, &
                long_name='1d column index of corresponding pft', ifill_value=ispval, ncid=ncid)
 
-          call ncd_defvar(varname='pfts1d_wtgcell', xtype=ncd_double, dim1name=namep, &
-               long_name='pft weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
-
-          call ncd_defvar(varname='pfts1d_wtlunit', xtype=ncd_double, dim1name=namep, &
-               long_name='pft weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
-
-          call ncd_defvar(varname='pfts1d_wtcol', xtype=ncd_double, dim1name=namep, &
-               long_name='pft weight relative to corresponding column', fill_value=spval, ncid=ncid)
-
           call ncd_defvar(varname='pfts1d_itype_veg', xtype=ncd_int, dim1name=namep, &
                long_name='pft vegetation type', ifill_value=ispval, ncid=ncid)
 
@@ -3973,6 +3955,45 @@ contains
 
           call ncd_defvar(varname='pfts1d_active', xtype=ncd_log, dim1name=namep, &
                ifill_value=0, long_name='true => do computations on this pft', ncid=ncid)
+
+          ! group the wt variables together in an if-statement
+          if (run_has_transient_landcover() .or. get_vars_1dwt_w_time()) then  ! transient simulation
+             call ncd_defvar(varname='land1d_wtgcell', xtype=ncd_double, dim1name=namel, dim2name='time', &
+                  long_name='landunit weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='cols1d_wtgcell', xtype=ncd_double, dim1name=namec, dim2name='time', &
+                  long_name='column weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='cols1d_wtlunit', xtype=ncd_double, dim1name=namec, dim2name='time', &
+                  long_name='column weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtgcell', xtype=ncd_double, dim1name=namep, dim2name='time', &
+                  long_name='pft weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtlunit', xtype=ncd_double, dim1name=namep, dim2name='time', &
+                  long_name='pft weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtcol', xtype=ncd_double, dim1name=namep, dim2name='time', &
+                  long_name='pft weight relative to corresponding column', fill_value=spval, ncid=ncid)
+          else
+             call ncd_defvar(varname='land1d_wtgcell', xtype=ncd_double, dim1name=namel, &
+                  long_name='landunit weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='cols1d_wtgcell', xtype=ncd_double, dim1name=namec, &
+                  long_name='column weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='cols1d_wtlunit', xtype=ncd_double, dim1name=namec, &
+                  long_name='column weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtgcell', xtype=ncd_double, dim1name=namep, &
+                  long_name='pft weight relative to corresponding gridcell', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtlunit', xtype=ncd_double, dim1name=namep, &
+                  long_name='pft weight relative to corresponding landunit', fill_value=spval, ncid=ncid)
+
+             call ncd_defvar(varname='pfts1d_wtcol', xtype=ncd_double, dim1name=namep, &
+                  long_name='pft weight relative to corresponding column', fill_value=spval, ncid=ncid)
+          end if
 
     else if (mode == 'write') then
 
@@ -4035,7 +4056,6 @@ contains
        ilarr = get_global_index_array(lun%gridcell(bounds%begl:bounds%endl), bounds%begl, bounds%endl, &
             subgrid_level=subgrid_level_gridcell)
        call ncd_io(varname='land1d_gi'       , data=ilarr, dim1name=namel, ncid=ncid, flag='write')
-       call ncd_io(varname='land1d_wtgcell'  , data=lun%wtgcell , dim1name=namel, ncid=ncid, flag='write')
        call ncd_io(varname='land1d_ityplunit', data=lun%itype   , dim1name=namel, ncid=ncid, flag='write')
        call ncd_io(varname='land1d_active'   , data=lun%active  , dim1name=namel, ncid=ncid, flag='write')
 
@@ -4066,14 +4086,12 @@ contains
             subgrid_level=subgrid_level_landunit)
        call ncd_io(varname='cols1d_li', data=icarr            , dim1name=namec, ncid=ncid, flag='write')
 
-       call ncd_io(varname='cols1d_wtgcell', data=col%wtgcell , dim1name=namec, ncid=ncid, flag='write')
-       call ncd_io(varname='cols1d_wtlunit', data=col%wtlunit , dim1name=namec, ncid=ncid, flag='write')
        call ncd_io(varname='cols1d_itype_col', data=col%itype , dim1name=namec, ncid=ncid, flag='write')
 
        do c = bounds%begc,bounds%endc
          icarr(c) = lun%itype(col%landunit(c))
        enddo
-       call ncd_io(varname='cols1d_itype_lunit', data=icarr    , dim1name=namec, ncid=ncid, flag='write')
+       call ncd_io(varname='cols1d_itype_lunit', data=icarr   , dim1name=namec, ncid=ncid, flag='write')
 
        call ncd_io(varname='cols1d_active' , data=col%active  , dim1name=namec, ncid=ncid, flag='write')
        call ncd_io(varname='cols1d_nbedrock', data=col%nbedrock , dim1name=namec, ncid=ncid, flag='write')
@@ -4109,9 +4127,6 @@ contains
             subgrid_level=subgrid_level_column)
        call ncd_io(varname='pfts1d_ci'  , data=iparr              , dim1name=namep, ncid=ncid, flag='write')
 
-       call ncd_io(varname='pfts1d_wtgcell'  , data=patch%wtgcell , dim1name=namep, ncid=ncid, flag='write')
-       call ncd_io(varname='pfts1d_wtlunit'  , data=patch%wtlunit , dim1name=namep, ncid=ncid, flag='write')
-       call ncd_io(varname='pfts1d_wtcol'    , data=patch%wtcol   , dim1name=namep, ncid=ncid, flag='write')
        call ncd_io(varname='pfts1d_itype_veg', data=patch%itype   , dim1name=namep, ncid=ncid, flag='write')
 
        do p = bounds%begp,bounds%endp
@@ -4122,9 +4137,26 @@ contains
        do p = bounds%begp,bounds%endp
           iparr(p) = lun%itype(patch%landunit(p))
        enddo
-       call ncd_io(varname='pfts1d_itype_lunit', data=iparr      , dim1name=namep, ncid=ncid, flag='write')
+       call ncd_io(varname='pfts1d_itype_lunit', data=iparr       , dim1name=namep, ncid=ncid, flag='write')
 
        call ncd_io(varname='pfts1d_active'   , data=patch%active  , dim1name=namep, ncid=ncid, flag='write')
+
+       ! group the wt variables together in an if-statement
+       if (run_has_transient_landcover() .or. get_vars_1dwt_w_time()) then  ! transient simulation
+          call ncd_io(varname='land1d_wtgcell'  , data=lun%wtgcell , dim1name=namel, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+          call ncd_io(varname='cols1d_wtgcell', data=col%wtgcell , dim1name=namec, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+          call ncd_io(varname='cols1d_wtlunit', data=col%wtlunit , dim1name=namec, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+          call ncd_io(varname='pfts1d_wtgcell'  , data=patch%wtgcell , dim1name=namep, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+          call ncd_io(varname='pfts1d_wtlunit'  , data=patch%wtlunit , dim1name=namep, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+          call ncd_io(varname='pfts1d_wtcol'    , data=patch%wtcol   , dim1name=namep, ncid=ncid, flag='write', nt=tape(t)%ntimes(f))
+       else
+          call ncd_io(varname='land1d_wtgcell'  , data=lun%wtgcell , dim1name=namel, ncid=ncid, flag='write')
+          call ncd_io(varname='cols1d_wtgcell', data=col%wtgcell , dim1name=namec, ncid=ncid, flag='write')
+          call ncd_io(varname='cols1d_wtlunit', data=col%wtlunit , dim1name=namec, ncid=ncid, flag='write')
+          call ncd_io(varname='pfts1d_wtgcell'  , data=patch%wtgcell , dim1name=namep, ncid=ncid, flag='write')
+          call ncd_io(varname='pfts1d_wtlunit'  , data=patch%wtlunit , dim1name=namep, ncid=ncid, flag='write')
+          call ncd_io(varname='pfts1d_wtcol'    , data=patch%wtcol   , dim1name=namep, ncid=ncid, flag='write')
+       end if
 
        deallocate(rgarr,rlarr,rcarr,rparr)
        deallocate(igarr,ilarr,icarr,iparr)
@@ -5780,6 +5812,8 @@ contains
        num2d = n_landuse_cats
     case ('fates_levlulu')
        num2d = n_landuse_cats * n_landuse_cats
+    case ('fates_levlupft')
+       num2d = n_landuse_cats * numpft_fates
     case('cft')
        if (cft_size > 0) then
           num2d = cft_size
